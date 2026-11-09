@@ -73,6 +73,16 @@ namespace CapsLockIndicatorV3
         private bool capsIcoOnlyWhenActive;
         private bool scrollIcoOnlyWhenActive;
 
+        // Persistent ("always visible") overlay handling.
+        // persistentOverlayCandidates holds the overlays that should stay visible
+        // for as long as their condition holds (persistent overlay settings and/or
+        // alwaysShowWhenActive). They are remembered when they get temporarily
+        // covered by another notification and restored afterwards.
+        private readonly List<IndicatorTrigger> persistentOverlayCandidates = new List<IndicatorTrigger>();
+        private IndicatorTrigger currentOverlayTrigger;
+        private bool currentOverlayIsPersistent;
+        private bool suppressPersistentSettingEvents;
+
         public MainForm()
         {
             Assembly assembly = Assembly.GetExecutingAssembly();
@@ -192,7 +202,18 @@ namespace CapsLockIndicatorV3
 
             fontButton.Font = SettingsManager.GetOrDefault<Font>("indFont");
 
-            onlyShowWhenActiveCheckBox.Checked = SettingsManager.Get<bool>("alwaysShowWhenActive");
+            var previousSuppress = suppressPersistentSettingEvents;
+            suppressPersistentSettingEvents = true;
+            try
+            {
+                onlyShowWhenActiveCheckBox.Checked = SettingsManager.Get<bool>("alwaysShowWhenActive");
+
+                RestorePersistentCheckboxes();
+            }
+            finally
+            {
+                suppressPersistentSettingEvents = previousSuppress;
+            }
 
             darkModeCheckBox.Enabled = DarkModeProvider.SystemSupportsDarkMode;
 
@@ -577,6 +598,12 @@ namespace CapsLockIndicatorV3
 
                 foreach (var i in Application.OpenForms.OfType<IndicatorOverlay>().Where(f => !f.IsDisposed))
                     i.Close();
+
+                // The overlay windows have been closed, so the persistent overlay
+                // has to be shown again.
+                currentOverlayTrigger = default(IndicatorTrigger);
+                currentOverlayIsPersistent = false;
+                RestorePersistentOverlay();
             }
         }
 
@@ -891,100 +918,118 @@ namespace CapsLockIndicatorV3
 
             // Handle the overlay
             if (numState != KeyHelper.isNumlockActive && enableNumInd.Checked && !showNoNotification.Checked)
-                ShowOverlay(new IndicatorTrigger()
-                {
-                    DisplayText = KeyHelper.isNumlockActive ?
-                        (SettingsManager.Get<string>("customMessageNumOn").Trim().Length > 0 ? SettingsManager.Get<string>("customMessageNumOn") : string.Format(strings.keyIsOn, strings.numLock)) :
-                        (SettingsManager.Get<string>("customMessageNumOff").Trim().Length > 0 ? SettingsManager.Get<string>("customMessageNumOff") : string.Format(strings.keyIsOff, strings.numLock)),
-                    NewState = KeyHelper.isNumlockActive,
-                    Key = IndicatorKey.Num
-                });
-            //ShowOverlay("Numlock is " + (KeyHelper.isNumlockActive ? "on" : "off"), KeyHelper.isNumlockActive);
+                ShowOverlay(CreateTrigger(IndicatorKey.Num, KeyHelper.isNumlockActive));
 
             if (capsState != KeyHelper.isCapslockActive && enableCapsInd.Checked && !showNoNotification.Checked)
-                ShowOverlay(new IndicatorTrigger()
-                {
-                    DisplayText = KeyHelper.isCapslockActive ?
-                        (SettingsManager.Get<string>("customMessageCapsOn").Trim().Length > 0 ? SettingsManager.Get<string>("customMessageCapsOn") : string.Format(strings.keyIsOn, strings.capsLock)) :
-                        (SettingsManager.Get<string>("customMessageCapsOff").Trim().Length > 0 ? SettingsManager.Get<string>("customMessageCapsOff") : string.Format(strings.keyIsOff, strings.capsLock)),
-                    NewState = KeyHelper.isCapslockActive,
-                    Key = IndicatorKey.Caps
-                });
+                ShowOverlay(CreateTrigger(IndicatorKey.Caps, KeyHelper.isCapslockActive));
 
             if (scrollState != KeyHelper.isScrolllockActive && enableScrollInd.Checked && !showNoNotification.Checked)
-                ShowOverlay(new IndicatorTrigger()
-                {
-                    DisplayText = KeyHelper.isScrolllockActive ?
-                        (SettingsManager.Get<string>("customMessageScrollOn").Trim().Length > 0 ? SettingsManager.Get<string>("customMessageScrollOn") : string.Format(strings.keyIsOn, strings.scrollLock)) :
-                        (SettingsManager.Get<string>("customMessageScrollOff").Trim().Length > 0 ? SettingsManager.Get<string>("customMessageScrollOff") : string.Format(strings.keyIsOff, strings.scrollLock)),
-                    NewState = KeyHelper.isScrolllockActive,
-                    Key = IndicatorKey.Scroll
-                });
+                ShowOverlay(CreateTrigger(IndicatorKey.Scroll, KeyHelper.isScrolllockActive));
 
             // Reset the values
             numState = KeyHelper.isNumlockActive;
             capsState = KeyHelper.isCapslockActive;
             scrollState = KeyHelper.isScrolllockActive;
+
+            // A persistent overlay is only supposed to be visible as long as its condition holds
+            if (currentOverlayIsPersistent && !IsValidPersistentCandidate(currentOverlayTrigger))
+            {
+                HideCurrentOverlay();
+                currentOverlayTrigger = default(IndicatorTrigger);
+                currentOverlayIsPersistent = false;
+                RestorePersistentOverlay();
+            }
+        }
+
+        /// <summary>
+        /// Creates the trigger (including the display text) for the given key and state.
+        /// </summary>
+        IndicatorTrigger CreateTrigger(IndicatorKey key, bool newState)
+        {
+            switch (key)
+            {
+                case IndicatorKey.Num:
+                    return new IndicatorTrigger()
+                    {
+                        DisplayText = newState ?
+                            (SettingsManager.Get<string>("customMessageNumOn").Trim().Length > 0 ? SettingsManager.Get<string>("customMessageNumOn") : string.Format(strings.keyIsOn, strings.numLock)) :
+                            (SettingsManager.Get<string>("customMessageNumOff").Trim().Length > 0 ? SettingsManager.Get<string>("customMessageNumOff") : string.Format(strings.keyIsOff, strings.numLock)),
+                        NewState = newState,
+                        Key = IndicatorKey.Num
+                    };
+                case IndicatorKey.Caps:
+                    return new IndicatorTrigger()
+                    {
+                        DisplayText = newState ?
+                            (SettingsManager.Get<string>("customMessageCapsOn").Trim().Length > 0 ? SettingsManager.Get<string>("customMessageCapsOn") : string.Format(strings.keyIsOn, strings.capsLock)) :
+                            (SettingsManager.Get<string>("customMessageCapsOff").Trim().Length > 0 ? SettingsManager.Get<string>("customMessageCapsOff") : string.Format(strings.keyIsOff, strings.capsLock)),
+                        NewState = newState,
+                        Key = IndicatorKey.Caps
+                    };
+                case IndicatorKey.Scroll:
+                    return new IndicatorTrigger()
+                    {
+                        DisplayText = newState ?
+                            (SettingsManager.Get<string>("customMessageScrollOn").Trim().Length > 0 ? SettingsManager.Get<string>("customMessageScrollOn") : string.Format(strings.keyIsOn, strings.scrollLock)) :
+                            (SettingsManager.Get<string>("customMessageScrollOff").Trim().Length > 0 ? SettingsManager.Get<string>("customMessageScrollOff") : string.Format(strings.keyIsOff, strings.scrollLock)),
+                        NewState = newState,
+                        Key = IndicatorKey.Scroll
+                    };
+                default:
+                    return new IndicatorTrigger()
+                    {
+                        DisplayText = string.Empty,
+                        NewState = newState,
+                        Key = IndicatorKey.None
+                    };
+            }
         }
 
         void ShowOverlay(IndicatorTrigger trigger)
         {
-            var isActive = trigger.NewState;
-            int timeOut = SettingsManager.Get<int>("indDisplayTime");
-            var alwaysShow = SettingsManager.Get<bool>("alwaysShowWhenActive") && isActive;
-            var showOnAllScreens = SettingsManager.Get<bool>("showNotificationOnAllScreens");
-            if (Application.OpenForms.OfType<IndicatorOverlay>().Any() && Application.OpenForms.OfType<IndicatorOverlay>().Where(f => !f.IsDisposed).Any())
+            // A new state of a key invalidates the persistent overlay remembered for that key
+            if (trigger.Key != IndicatorKey.None)
+                persistentOverlayCandidates.RemoveAll(t => t.Key == trigger.Key && t.NewState != trigger.NewState);
+
+            if (IsPersistentTrigger(trigger))
             {
-                IndicatorOverlay indicatorOverlay = Application.OpenForms.OfType<IndicatorOverlay>().Where(f => !f.IsDisposed).First();
-                indicatorOverlay.UpdateIndicator(
-                      trigger
-                    , timeOut
-                    , isActive ? SettingsManager.Get<Color>("indBgColourActive") : SettingsManager.Get<Color>("indBgColourInactive")
-                    , isActive ? SettingsManager.Get<Color>("indFgColourActive") : SettingsManager.Get<Color>("indFgColourInactive")
-                    , isActive ? SettingsManager.Get<Color>("indBdColourActive") : SettingsManager.Get<Color>("indBdColourInactive")
-                    , SettingsManager.Get<int>("bdSize")
-                    , SettingsManager.GetOrDefault<Font>("indFont")
-                    , SettingsManager.Get<IndicatorDisplayPosition>("overlayPosition")
-                    , SettingsManager.Get<int>("indOpacity")
-                    , alwaysShow
-                );
+                persistentOverlayCandidates.RemoveAll(t => t.Key == trigger.Key);
+                persistentOverlayCandidates.Add(trigger);
             }
-            else
-            {
-                IndicatorOverlay indicatorOverlay = new IndicatorOverlay(
-                      trigger
-                    , timeOut
-                    , isActive ? SettingsManager.Get<Color>("indBgColourActive") : SettingsManager.Get<Color>("indBgColourInactive")
-                    , isActive ? SettingsManager.Get<Color>("indFgColourActive") : SettingsManager.Get<Color>("indFgColourInactive")
-                    , isActive ? SettingsManager.Get<Color>("indBdColourActive") : SettingsManager.Get<Color>("indBdColourInactive")
-                    , SettingsManager.Get<int>("bdSize")
-                    , SettingsManager.GetOrDefault<Font>("indFont")
-                    , SettingsManager.Get<IndicatorDisplayPosition>("overlayPosition")
-                    , SettingsManager.Get<int>("indOpacity")
-                    , alwaysShow
-                );
-            }
+
+            DisplayOverlay(trigger);
         }
 
         void ShowOverlayInfo(string message)
         {
-            int timeOut = SettingsManager.Get<int>("indDisplayTime");
-            if (timeOut < 0)
-                timeOut = 2000;
-            var alwaysShow = false;
-            if (Application.OpenForms.OfType<IndicatorOverlay>().Any() && Application.OpenForms.OfType<IndicatorOverlay>().Where(f => !f.IsDisposed).Any())
+            DisplayOverlay(new IndicatorTrigger()
             {
-                IndicatorOverlay indicatorOverlay = Application.OpenForms.OfType<IndicatorOverlay>().Where(f => !f.IsDisposed).First();
+                DisplayText = message,
+                Key = IndicatorKey.None
+            });
+        }
+
+        void DisplayOverlay(IndicatorTrigger trigger)
+        {
+            var isInfo = trigger.Key == IndicatorKey.None;
+            var isActive = trigger.NewState;
+            int timeOut = SettingsManager.Get<int>("indDisplayTime");
+            if (isInfo && timeOut < 0)
+                timeOut = 2000;
+            var alwaysShow = SettingsManager.Get<bool>("alwaysShowWhenActive") && isActive;
+            var showOnAllScreens = SettingsManager.Get<bool>("showNotificationOnAllScreens");
+
+            var overlays = Application.OpenForms.OfType<IndicatorOverlay>().Where(f => !f.IsDisposed).ToList();
+
+            if (overlays.Any())
+            {
+                IndicatorOverlay indicatorOverlay = overlays.First();
                 indicatorOverlay.UpdateIndicator(
-                      new IndicatorTrigger()
-                      {
-                          DisplayText = message,
-                          Key = IndicatorKey.None
-                      }
+                      trigger
                     , timeOut
-                    , SettingsManager.Get<Color>("indBgColourInactive")
-                    , SettingsManager.Get<Color>("indFgColourInactive")
-                    , SettingsManager.Get<Color>("indFgColourInactive")
+                    , isActive ? SettingsManager.Get<Color>("indBgColourActive") : SettingsManager.Get<Color>("indBgColourInactive")
+                    , isActive ? SettingsManager.Get<Color>("indFgColourActive") : SettingsManager.Get<Color>("indFgColourInactive")
+                    , isActive ? SettingsManager.Get<Color>("indBdColourActive") : SettingsManager.Get<Color>("indBdColourInactive")
                     , SettingsManager.Get<int>("bdSize")
                     , SettingsManager.GetOrDefault<Font>("indFont")
                     , SettingsManager.Get<IndicatorDisplayPosition>("overlayPosition")
@@ -995,21 +1040,258 @@ namespace CapsLockIndicatorV3
             else
             {
                 IndicatorOverlay indicatorOverlay = new IndicatorOverlay(
-                      new IndicatorTrigger()
-                      {
-                          DisplayText = message,
-                          Key = IndicatorKey.None
-                      }
+                      trigger
                     , timeOut
-                    , SettingsManager.Get<Color>("indBgColourInactive")
-                    , SettingsManager.Get<Color>("indFgColourInactive")
-                    , SettingsManager.Get<Color>("indFgColourInactive")
+                    , isActive ? SettingsManager.Get<Color>("indBgColourActive") : SettingsManager.Get<Color>("indBgColourInactive")
+                    , isActive ? SettingsManager.Get<Color>("indFgColourActive") : SettingsManager.Get<Color>("indFgColourInactive")
+                    , isActive ? SettingsManager.Get<Color>("indBdColourActive") : SettingsManager.Get<Color>("indBdColourInactive")
                     , SettingsManager.Get<int>("bdSize")
                     , SettingsManager.GetOrDefault<Font>("indFont")
                     , SettingsManager.Get<IndicatorDisplayPosition>("overlayPosition")
                     , SettingsManager.Get<int>("indOpacity")
                     , alwaysShow
                 );
+                indicatorOverlay.OverlayHidden += IndicatorOverlay_OverlayHidden;
+            }
+
+            currentOverlayTrigger = trigger;
+            currentOverlayIsPersistent = IsPersistentTrigger(trigger);
+        }
+
+        /// <summary>
+        /// Returns true if the given trigger describes an overlay that should stay
+        /// visible for as long as its condition holds.
+        /// </summary>
+        private bool IsPersistentTrigger(IndicatorTrigger trigger)
+        {
+            if (trigger.Key == IndicatorKey.None)
+                return false;
+
+            if (IndicatorTrigger.ShowInfinite(trigger))
+                return true;
+
+            return SettingsManager.Get<bool>("alwaysShowWhenActive") && trigger.NewState;
+        }
+
+        /// <summary>
+        /// Checks whether the actual state of the key still matches the state of the trigger.
+        /// </summary>
+        private bool IsTriggerStateCurrent(IndicatorTrigger trigger)
+        {
+            switch (trigger.Key)
+            {
+                case IndicatorKey.Num:
+                    return KeyHelper.isNumlockActive == trigger.NewState;
+                case IndicatorKey.Caps:
+                    return KeyHelper.isCapslockActive == trigger.NewState;
+                case IndicatorKey.Scroll:
+                    return KeyHelper.isScrolllockActive == trigger.NewState;
+                default:
+                    return false;
+            }
+        }
+
+        /// <summary>
+        /// Checks whether notifications for the key of the trigger are enabled.
+        /// </summary>
+        private bool IsNotificationEnabled(IndicatorTrigger trigger)
+        {
+            if (showNoNotification.Checked)
+                return false;
+
+            switch (trigger.Key)
+            {
+                case IndicatorKey.Num:
+                    return enableNumInd.Checked;
+                case IndicatorKey.Caps:
+                    return enableCapsInd.Checked;
+                case IndicatorKey.Scroll:
+                    return enableScrollInd.Checked;
+                default:
+                    return false;
+            }
+        }
+
+        private bool IsValidPersistentCandidate(IndicatorTrigger trigger)
+        {
+            return IsPersistentTrigger(trigger) && IsTriggerStateCurrent(trigger) && IsNotificationEnabled(trigger);
+        }
+
+        /// <summary>
+        /// Shows a persistent overlay again, if there is one that should still be visible.
+        /// It is called when a notification that covered a persistent overlay has disappeared.
+        /// </summary>
+        private void RestorePersistentOverlay()
+        {
+            persistentOverlayCandidates.RemoveAll(t => !IsValidPersistentCandidate(t));
+
+            // Prefer the candidate of the same key as the overlay that was displayed before
+            var candidate = persistentOverlayCandidates.LastOrDefault(t => t.Key == currentOverlayTrigger.Key);
+            if (!IsValidPersistentCandidate(candidate))
+                candidate = persistentOverlayCandidates.LastOrDefault();
+
+            if (candidate.Key == IndicatorKey.None)
+                return;
+
+            if (currentOverlayIsPersistent && currentOverlayTrigger.Key == candidate.Key && currentOverlayTrigger.NewState == candidate.NewState)
+                return;
+
+            DisplayOverlay(candidate);
+        }
+
+        private void IndicatorOverlay_OverlayHidden(object sender, EventArgs e)
+        {
+            // A persistent overlay doesn't hide itself, so only transient overlays
+            // need to be replaced by the persistent one they covered.
+            if (currentOverlayIsPersistent)
+                return;
+
+            RestorePersistentOverlay();
+        }
+
+        /// <summary>
+        /// Hides the currently displayed overlay without closing it, so that it can be reused.
+        /// </summary>
+        private void HideCurrentOverlay()
+        {
+            foreach (var overlay in Application.OpenForms.OfType<IndicatorOverlay>().Where(f => !f.IsDisposed).ToList())
+                overlay.HideOverlay();
+        }
+
+        /// <summary>
+        /// Applies a changed persistent overlay setting: the overlay of that key is hidden
+        /// when the setting was disabled and shown when the setting was enabled and its
+        /// condition already holds.
+        /// </summary>
+        private void ApplyPersistentOverlayState(IndicatorKey key, bool newState, bool enabled)
+        {
+            persistentOverlayCandidates.RemoveAll(t => !IsValidPersistentCandidate(t));
+            persistentOverlayCandidates.RemoveAll(t => t.Key == key);
+
+            IndicatorTrigger newCandidate = default(IndicatorTrigger);
+            if (enabled && key != IndicatorKey.None)
+            {
+                newCandidate = CreateTrigger(key, newState);
+                if (!IsValidPersistentCandidate(newCandidate))
+                    newCandidate = default(IndicatorTrigger);
+            }
+
+            if (currentOverlayIsPersistent && !IsValidPersistentCandidate(currentOverlayTrigger))
+            {
+                HideCurrentOverlay();
+                currentOverlayTrigger = default(IndicatorTrigger);
+                currentOverlayIsPersistent = false;
+            }
+
+            if (newCandidate.Key != IndicatorKey.None)
+            {
+                persistentOverlayCandidates.Add(newCandidate);
+                DisplayOverlay(newCandidate);
+                return;
+            }
+
+            if (!currentOverlayIsPersistent)
+                RestorePersistentOverlay();
+        }
+
+        /// <summary>
+        /// Translates the tag of a persistent overlay check box into the corresponding key and state.
+        /// </summary>
+        private static bool TryParsePersistentTag(string tag, out IndicatorKey key, out bool newState)
+        {
+            key = IndicatorKey.None;
+            newState = false;
+
+            if (string.IsNullOrEmpty(tag))
+                return false;
+
+            if (tag.EndsWith("Off", StringComparison.OrdinalIgnoreCase))
+            {
+                newState = false;
+                tag = tag.Substring(0, tag.Length - 3);
+            }
+            else if (tag.EndsWith("On", StringComparison.OrdinalIgnoreCase))
+            {
+                newState = true;
+                tag = tag.Substring(0, tag.Length - 2);
+            }
+            else
+                return false;
+
+            switch (tag.ToLowerInvariant())
+            {
+                case "num":
+                    key = IndicatorKey.Num;
+                    return true;
+                case "caps":
+                    key = IndicatorKey.Caps;
+                    return true;
+                case "scroll":
+                    key = IndicatorKey.Scroll;
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        /// <summary>
+        /// Restores the checked state of the persistent overlay check boxes from the settings.
+        /// </summary>
+        private void RestorePersistentCheckboxes()
+        {
+            var persistentCheckBoxes = new BetterCheckBox[]
+            {
+                cbPersistentNumOff,
+                cbPersistentNumOn,
+                cbPersistentCapsOff,
+                cbPersistentCapsOn,
+                cbPersistentScrollOff,
+                cbPersistentScrollOn
+            };
+
+            var previousSuppress = suppressPersistentSettingEvents;
+            suppressPersistentSettingEvents = true;
+            try
+            {
+                foreach (var checkBox in persistentCheckBoxes)
+                {
+                    if (checkBox.Tag == null)
+                        continue;
+
+                    var key = "persistentOverlay" + checkBox.Tag.ToString();
+                    checkBox.Checked = SettingsManager.Get<bool>(key);
+                }
+            }
+            finally
+            {
+                suppressPersistentSettingEvents = previousSuppress;
+            }
+        }
+
+        /// <summary>
+        /// Shows the persistent overlay of the first key whose persistent overlay setting
+        /// is enabled and whose condition already holds.
+        /// </summary>
+        private void ApplyStartupPersistentOverlays()
+        {
+            var keys = new[] { IndicatorKey.Num, IndicatorKey.Caps, IndicatorKey.Scroll };
+
+            foreach (var key in keys)
+            {
+                foreach (var state in new[] { true, false })
+                {
+                    var trigger = CreateTrigger(key, state);
+
+                    if (!IndicatorTrigger.ShowInfinite(trigger))
+                        continue;
+                    if (!IsNotificationEnabled(trigger))
+                        continue;
+                    if (!IsTriggerStateCurrent(trigger))
+                        continue;
+
+                    ShowOverlay(trigger);
+                    return;
+                }
             }
         }
 
@@ -1121,6 +1403,9 @@ namespace CapsLockIndicatorV3
             string version = fvi.FileVersion;
             string copyright = fvi.LegalCopyright;
             aboutText.Text = string.Format(resources.GetString("aboutTextFormat"), version, copyright);
+
+            // Show a persistent overlay right away, if its condition already holds
+            ApplyStartupPersistentOverlays();
 
             if (SettingsManager.Get<bool>("checkForUpdates"))
                 doVersionCheck(false);
@@ -1476,7 +1761,49 @@ namespace CapsLockIndicatorV3
 
         private void onlyShowWhenActiveCheckBox_CheckedChanged(object sender, EventArgs e)
         {
+            if (suppressPersistentSettingEvents)
+                return;
+
             SettingsManager.Set("alwaysShowWhenActive", onlyShowWhenActiveCheckBox.Checked);
+            SettingsManager.Save();
+
+            ApplyAlwaysShowWhenActiveState();
+        }
+
+        /// <summary>
+        /// Applies a changed "always show when active" setting. Overlays that are only
+        /// persistent because of that setting are shown or hidden accordingly.
+        /// </summary>
+        private void ApplyAlwaysShowWhenActiveState()
+        {
+            persistentOverlayCandidates.RemoveAll(t => !IsValidPersistentCandidate(t));
+
+            if (currentOverlayIsPersistent && !IsValidPersistentCandidate(currentOverlayTrigger))
+            {
+                HideCurrentOverlay();
+                currentOverlayTrigger = default(IndicatorTrigger);
+                currentOverlayIsPersistent = false;
+            }
+
+            if (currentOverlayIsPersistent)
+                return;
+
+            // Show the overlay of a key that is currently active
+            if (SettingsManager.Get<bool>("alwaysShowWhenActive"))
+            {
+                foreach (var key in new[] { IndicatorKey.Num, IndicatorKey.Caps, IndicatorKey.Scroll })
+                {
+                    var trigger = CreateTrigger(key, true);
+                    if (!IsValidPersistentCandidate(trigger))
+                        continue;
+
+                    persistentOverlayCandidates.Add(trigger);
+                    DisplayOverlay(trigger);
+                    return;
+                }
+            }
+
+            RestorePersistentOverlay();
         }
 
         private void bdSizeLabel_Click(object sender, EventArgs e)
@@ -1557,7 +1884,24 @@ namespace CapsLockIndicatorV3
 
         private void cbPersistent_CheckedChanged(object sender, EventArgs e)
         {
-            SettingsManager.Set("persistentOverlay" + (sender as BetterCheckBox).Tag.ToString(), (sender as BetterCheckBox).Checked);
+            // The check boxes are initialized from the settings on startup,
+            // which must not be written back to the settings.
+            if (suppressPersistentSettingEvents)
+                return;
+
+            var cb = sender as BetterCheckBox;
+            if (cb == null || cb.Tag == null)
+                return;
+
+            SettingsManager.Set("persistentOverlay" + cb.Tag.ToString(), cb.Checked);
+            SettingsManager.Save();
+
+            IndicatorKey key;
+            bool newState;
+            if (!TryParsePersistentTag(cb.Tag.ToString(), out key, out newState))
+                return;
+
+            ApplyPersistentOverlayState(key, newState, cb.Checked);
         }
     }
 }

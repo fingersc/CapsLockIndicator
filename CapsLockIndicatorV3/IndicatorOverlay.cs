@@ -112,6 +112,13 @@ namespace CapsLockIndicatorV3
 
         private Size originalSize;
 
+        /// <summary>
+        /// Raised whenever the overlay hides itself because its display time elapsed.
+        /// The main form uses this event to restore a previously shown persistent
+        /// (always visible) overlay that was temporarily covered by a notification.
+        /// </summary>
+        public event EventHandler OverlayHidden;
+
         private IndicatorDisplayPosition pos = IndicatorDisplayPosition.BottomRight;
 
         const int WINDOW_MARGIN = 16;
@@ -452,6 +459,26 @@ namespace CapsLockIndicatorV3
 
         void WindowCloseTimerTick(object sender, EventArgs e)
         {
+            // The timer is repeating, so it has to be stopped explicitly.
+            // Otherwise the overlay would be hidden over and over again and the
+            // OverlayHidden event would be raised multiple times.
+            windowCloseTimer.Stop();
+            fadeTimer.Stop();
+            Hide();
+
+            var handler = OverlayHidden;
+            if (handler != null)
+                handler(this, EventArgs.Empty);
+        }
+
+        /// <summary>
+        /// Hides the overlay without closing or disposing it, so that the instance
+        /// can be reused later on.
+        /// </summary>
+        public void HideOverlay()
+        {
+            windowCloseTimer.Stop();
+            fadeTimer.Stop();
             Hide();
         }
 

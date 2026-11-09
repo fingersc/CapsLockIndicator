@@ -1,0 +1,121 @@
+# 手动触发的 Windows 编译工作流
+#
+# 用法：GitHub 仓库 → Actions → Build → Run workflow
+#
+# 关键点：
+#  1) 工程是 .NET Framework 4.7.1 的老式 WinForms csproj，而 GitHub 的 windows runner
+#     默认只装 4.8 目标包（直接编译会报 MSB3644：找不到 v4.7.1 的引用程序集），
+#     所以这里用 NuGet 官方的 Microsoft.NETFramework.ReferenceAssemblies.net471 提供 4.7.1 参考程序集。
+#  2) 工程里写了 <SignAssembly>true</SignAssembly>，但仓库中没有 .snk 密钥文件，
+#     强名称签名会因为找不到密钥而失败，因此默认用 /p:SignAssembly=false 关闭；
+#     需要签名时把输入项打开，并把 .snk 一起提交进仓库。
+#  3) .sln 路径自动探测，仓库根目录是 src/ 或它的上级目录都能用。
+#  4) 工程没有 PackageReference，无需 nuget restore。
+
+name: Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      configuration:
+        description: "编译配置"
+        type: choice
+        options:
+          - Release
+          - Debug
+        default: Release
+      sign_assembly:
+        description: "强名称签名（需要仓库内含 .snk 密钥文件）"
+        type: boolean
+        default: false
+      upload_artifact:
+        description: "上传编译产物"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build on windows
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 准备 MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: 准备 .NET Framework 4.7.1 参考程序集
+        shell: pwsh
+        run: |
+          # 不用 ErrorActionPreference=Stop，这样 msbuild 返回非 0 时还能走下面的降级重试
+          $ErrorActionPreference = "Continue"
+          $pkgRoot = Join-Path $env:GITHUB_WORKSPACE ".refasm"
+          New-Item -ItemType Directory -Force -Path $pkgRoot | Out-Null
+          $nupkg = Join-Path $pkgRoot "refasm.zip"
+          $url = "https://api.nuget.org/v3-flatcontainer/microsoft.netframework.referenceassemblies.net471/1.0.3/microsoft.netframework.referenceassemblies.net471.1.0.3.nupkg"
+          Write-Host "下载参考程序集包：$url"
+          Invoke-WebRequest -Uri $url -OutFile $nupkg
+          Expand-Archive -Path $nupkg -DestinationPath (Join-Path $pkgRoot "pkg") -Force
+
+          $refRoot = Join-Path $pkgRoot "pkg\build"
+          if (-not (Test-Path (Join-Path $refRoot ".NETFramework\v4.7.1"))) {
+            throw "4.7.1 参考程序集解压失败，目录不存在：$refRoot"
+          }
+          Write-Host "参考程序集根目录：$refRoot"
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "REF_ROOT=$refRoot`n")
+
+      - name: 编译
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Continue"
+          $sln = Get-ChildItem -Path $env:GITHUB_WORKSPACE -Recurse -Filter "*.sln" |
+                 Where-Object { $_.FullName -notmatch '\\obj\\' } |
+                 Select-Object -First 1
+          if (-not $sln) { throw "在仓库里没有找到 .sln 解决方案文件" }
+          Write-Host "解决方案：$($sln.FullName)"
+
+          $common = @(
+            "/p:Configuration=${{ inputs.configuration }}",
+            "/p:Platform=Any CPU",
+            "/p:SignAssembly=${{ inputs.sign_assembly }}",
+            "/m",
+            "/v:minimal",
+            "/nologo"
+          )
+
+          Push-Location $sln.DirectoryName
+          try {
+            & msbuild $sln.Name @common "/p:TargetFrameworkRootPath=$env:REF_ROOT\"
+            $code = $LASTEXITCODE
+            if ($code -ne 0) {
+              Write-Host "使用 4.7.1 参考程序集编译失败（退出码 $code），改用 runner 自带的 4.8 目标包重试一次……"
+              & msbuild $sln.Name @common "/p:TargetFrameworkVersion=v4.8"
+              $code = $LASTEXITCODE
+            }
+          }
+          finally {
+            Pop-Location
+          }
+          if ($code -ne 0) { throw "msbuild 编译失败，退出码 $code" }
+
+          $exe = Get-ChildItem -Path $env:GITHUB_WORKSPACE -Recurse -Filter "CapsLockIndicatorV3.exe" |
+                 Where-Object { $_.FullName -match '\\bin\\' } |
+                 Select-Object -First 1
+          if (-not $exe) { throw "编译结束但没有找到 CapsLockIndicatorV3.exe" }
+          $info = (Get-Item $exe.FullName).VersionInfo
+          Write-Host "产物：$($exe.FullName)"
+          Write-Host "文件版本：$($info.FileVersion) / 程序集版本：$($info.ProductVersion)"
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "BUILD_OUTPUT_DIR=$($exe.Directory.FullName)`n")
+
+      - name: 上传编译产物
+        if: ${{ inputs.upload_artifact }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: CapsLockIndicatorV3-${{ inputs.configuration }}
+          path: ${{ env.BUILD_OUTPUT_DIR }}
+          if-no-files-found: error
