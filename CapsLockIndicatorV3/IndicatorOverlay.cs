@@ -113,6 +113,17 @@ namespace CapsLockIndicatorV3
         private Size originalSize;
 
         /// <summary>
+        /// The key the currently displayed notification belongs to. If it isn't
+        /// None, the key specific glyph is drawn next to the text.
+        /// </summary>
+        private IndicatorKey glyphKey = IndicatorKey.None;
+
+        /// <summary>
+        /// Whether the key belonging to the glyph is currently active.
+        /// </summary>
+        private bool glyphActive;
+
+        /// <summary>
         /// Raised whenever the overlay hides itself because its display time elapsed.
         /// The main form uses this event to restore a previously shown persistent
         /// (always visible) overlay that was temporarily covered by a notification.
@@ -243,11 +254,46 @@ namespace CapsLockIndicatorV3
             //        Height - Padding.Vertical
             //    ), sf);
 
-            TextRenderer.DrawText(e.Graphics, contentLabel.Text, contentLabel.Font, new Rectangle(
+            var textRect = new Rectangle(
                 Padding.Left,
                 Padding.Top,
                 Width - Padding.Horizontal,
-                Height - Padding.Vertical
+                Height - Padding.Vertical);
+
+            if (textRect.Width <= 0 || textRect.Height <= 0)
+                return;
+
+            // The key specific glyph (caps lock: "A", num lock: "5", scroll
+            // lock: down arrow) is drawn to the right of the text. If the key
+            // is inactive, the glyph is crossed out. Text and glyph are laid
+            // out as one group, so that the glyph always sits right next to
+            // the text and the whole group stays centered.
+            var hasGlyph = KeyStateGlyph.IsSupported(glyphKey);
+            var boxSize = hasGlyph ? KeyStateGlyph.GetBoxSize(contentLabel.Font) : 0;
+            var gap = hasGlyph ? (int)Math.Round(boxSize * 0.3) : 0;
+
+            var textSize = TextRenderer.MeasureText(contentLabel.Text, contentLabel.Font);
+            var groupWidth = textSize.Width + gap + boxSize;
+            var groupLeft = textRect.Left + Math.Max(0, (textRect.Width - groupWidth) / 2);
+
+            if (hasGlyph)
+            {
+                var glyphRect = new Rectangle(
+                    groupLeft + textSize.Width + gap,
+                    textRect.Top + (textRect.Height - boxSize) / 2,
+                    boxSize,
+                    boxSize);
+
+                KeyStateGlyph.Draw(e.Graphics, glyphKey, glyphActive, glyphRect, ForeColor);
+            }
+
+            // The extra pixels on both sides prevent the text from being
+            // clipped, without moving it (the center stays the same).
+            TextRenderer.DrawText(e.Graphics, contentLabel.Text, contentLabel.Font, new Rectangle(
+                groupLeft - 1,
+                textRect.Top,
+                textSize.Width + 2,
+                textRect.Height
             ), ForeColor, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
         }
 
@@ -300,6 +346,7 @@ namespace CapsLockIndicatorV3
                 return;
 
             contentLabel.Text = trigger.DisplayText;
+            SetGlyph(trigger);
             originalSize = Size;
 
             if (timeoutInMs < 0 || IndicatorTrigger.ShowInfinite(trigger))
@@ -328,6 +375,7 @@ namespace CapsLockIndicatorV3
 
 
             contentLabel.Text = trigger.DisplayText;
+            SetGlyph(trigger);
             Font = font;
             originalSize = Size;
 
@@ -379,6 +427,7 @@ namespace CapsLockIndicatorV3
             pos = position;
             Opacity = 1;
             contentLabel.Text = trigger.DisplayText;
+            SetGlyph(trigger);
             opacity_timer_value = 2.0;
             windowCloseTimer.Stop();
             windowCloseTimer.Start();
@@ -397,6 +446,7 @@ namespace CapsLockIndicatorV3
             pos = position;
             Opacity = 1;
             contentLabel.Text = trigger.DisplayText;
+            SetGlyph(trigger);
             opacity_timer_value = 2.0;
             if (timeoutInMs < 0 || IndicatorTrigger.ShowInfinite(trigger))
             {
@@ -428,6 +478,7 @@ namespace CapsLockIndicatorV3
             lastOpacity = op;
             SetOpacity(op);
             contentLabel.Text = trigger.DisplayText;
+            SetGlyph(trigger);
             Font = font;
             opacity_timer_value = 2.0;
             if (timeoutInMs < 0 || alwaysShow || IndicatorTrigger.ShowInfinite(trigger))
@@ -499,12 +550,37 @@ namespace CapsLockIndicatorV3
             SetWindowStyles();
         }
 
+        /// <summary>
+        /// Remembers the key the given notification belongs to, so that the
+        /// key specific glyph can be drawn next to the text. Notifications
+        /// without a key (informational messages) don't get a glyph.
+        /// </summary>
+        private void SetGlyph(IndicatorTrigger trigger)
+        {
+            glyphKey = trigger.Key;
+            glyphActive = trigger.NewState;
+        }
+
         void RecalculateSize()
         {
-            var textSize = TextRenderer.MeasureText(contentLabel.Text, Font);
-            textSize.Width += Padding.Horizontal;
-            textSize.Height += Padding.Vertical;
-            Size = textSize;
+            var textSize = TextRenderer.MeasureText(contentLabel.Text, contentLabel.Font);
+            var width = textSize.Width;
+            var height = textSize.Height;
+
+            // Make room for the key specific glyph on the right of the text
+            if (KeyStateGlyph.IsSupported(glyphKey))
+            {
+                var boxSize = KeyStateGlyph.GetBoxSize(contentLabel.Font);
+                var gap = (int)Math.Round(boxSize * 0.3);
+
+                width += boxSize + gap;
+                height = Math.Max(height, boxSize);
+            }
+
+            width += Padding.Horizontal;
+            height += Padding.Vertical;
+
+            Size = new Size(width, height);
         }
         void BringToFrontNoFocus()
         {
