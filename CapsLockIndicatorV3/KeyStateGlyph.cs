@@ -15,9 +15,17 @@ namespace CapsLockIndicatorV3
     /// Num lock    -> "5"
     /// Scroll lock -> down arrow
     ///
-    /// If the key is not active, the glyph is crossed out with a diagonal line
-    /// (from top left to bottom right, at a shallower angle than 45 degrees so
-    /// that it can not be confused with the leg of the letter "A").
+    /// Every glyph says the same thing: without the diagonal line the key does
+    /// its job right now, with the line it does not.
+    ///
+    /// caps lock    -> available while the key is on  (upper case letters)
+    /// num lock     -> available while the key is on  (digits on the keypad)
+    /// scroll lock  -> available while the key is off (scrolling is locked
+    ///                 while the key is on, so the arrow can not move)
+    ///
+    /// The line runs from the top left to the bottom right at a shallower angle
+    /// than 45 degrees, so that it can not be confused with the leg of the
+    /// letter "A".
     ///
     /// The letters are taken from the outlines of a system font and the arrow
     /// is built from simple shapes. All glyphs are filled as vector paths: they
@@ -107,7 +115,9 @@ namespace CapsLockIndicatorV3
                         break;
                 }
 
-                if (!isActive)
+                // All three glyphs carry the same meaning, so the rule for the
+                // diagonal line is the same for all of them as well
+                if (!IsActionAvailable(key, isActive))
                     DrawSlash(g, box, colour);
             }
             finally
@@ -217,6 +227,34 @@ namespace CapsLockIndicatorV3
                 pen.EndCap = LineCap.Round;
 
                 g.DrawLine(pen, MapPoint(box, 0.02f, 0.20f), MapPoint(box, 0.98f, 0.80f));
+            }
+        }
+
+        /// <summary>
+        /// Returns true while the key does what it is there for. This is what
+        /// the glyphs show, and it is the only rule needed to decide whether
+        /// the diagonal line is drawn:
+        ///
+        /// caps lock      on  -> upper case letters can be typed
+        /// caps lock      off -> they can not
+        /// num lock       on  -> digits can be typed on the numeric keypad
+        /// num lock       off -> they can not
+        /// scroll lock    off -> the screen can be scrolled
+        /// scroll lock    on  -> scrolling is locked
+        /// </summary>
+        private static bool IsActionAvailable(IndicatorKey key, bool isActive)
+        {
+            switch (key)
+            {
+                case IndicatorKey.Caps:
+                case IndicatorKey.Num:
+                    return isActive;
+                case IndicatorKey.Scroll:
+                    return !isActive;
+                default:
+                    // Informational messages have no key, so nothing about them
+                    // can be available or unavailable
+                    return false;
             }
         }
 
